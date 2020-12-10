@@ -338,37 +338,62 @@ END;
 /
 
 --Questions and Queries
---First query: which pages are experiencing edit conflicts?
+--First query: Find the most recent revision time of each page
+WITH OwnedRevisions AS
+    (SELECT container_id revision_id, time_saved, predecessor_id, owner_id page_id
+    FROM Revision
+    NATURAL JOIN NugatoriaContainer),
+        
+MostRecentRevTimesPerPage AS
+    (SELECT page_id,
+            MAX(time_saved) AS most_recent_rev_time   
+    FROM OwnedRevisions
+    GROUP BY page_id),
+    
+MostRecentRevsPerPage AS
+    (SELECT OwnedRevisions.page_id, revision_id, time_saved, predecessor_id
+    FROM OwnedRevisions
+        JOIN MostRecentRevTimesPerPage
+        ON OwnedRevisions.page_id = MostRecentRevTimesPerPage.page_id
+    WHERE time_saved = most_recent_rev_time),
 
---Named subquery: Most_Recent_Revision
---returns the most recent revision of each page
-WITH Most_Recent_Revision AS
-(SELECT AllRevisions.container_id, owner_id, time_saved
-FROM Revision AllRevisions 
-JOIN NugatoriaContainer AllContainers ON AllRevisions.container_id = AllContainers.container_id
-WHERE time_saved = (SELECT MAX(time_saved) 
-                    FROM Revision ThisRevision
-                    JOIN NugatoriaContainer ThisContainer ON ThisRevision.container_id = ThisContainer.container_id
-                    WHERE AllContainers.owner_id = ThisContainer.owner_id)
-)
+OlderConflictingRevs AS
+    (SELECT OwnedRevisions.page_id,
+    OwnedRevisions.revision_id older_revision_id, 
+    OwnedRevisions.time_saved older_time_saved, OwnedRevisions.predecessor_id
+     FROM MostRecentRevsPerPage
+      JOIN OwnedRevisions
+     ON MostRecentRevsPerPage.predecessor_id = OwnedRevisions.predecessor_id
+     WHERE MostRecentRevsPerPage.time_saved > OwnedRevisions.time_saved)
 
---Using those two named subqueries, identify any conflicting edits
-SELECT OwningPage.container_name,
-ConflictingRevision.container_id AS id_of_older_conflicting_revision,
-ConflictingRevision.time_saved AS time_of_older_revision,
-Most_Recent_Revision.container_id AS id_of_newer_conflicting_revision,
-Most_Recent_Revision.most_recent_time_saved AS time_of_newer_revision,
-ConflictingRevision.predecessor_id
-FROM NugatoriaContainer ConflictingContainer
-JOIN Revision ConflictingRevision ON ConflictingContainer.container_id = ConflictingRevision.container_id
-JOIN NugatoriaContainer OwningPage on ConflictingContainer.owner_id = OwningPage.container_id
-JOIN Most_Recent_Revision ON Most_Recent_Revision.predecessor_id = ConflictingRevision.predecessor_id --problem here (MRR doesn't have predecessor_id)
-WHERE ConflictingContainer.owner_id = 3 --belonging to Page 3. Hardcoded magic number alert!
---Not the most recent revision
-AND ConflictingRevision.time_saved != (SELECT time_saved FROM Most_Recent_Revision) --anonymous subquery 
---and predecessor_id is same as that of most recent
-AND ConflictingRevision.predecessor_id = (SELECT predecessor_id FROM Most_Recent_Revision); --anonymous subquery 
+SELECT OlderConflictingRevs.page_id, 
+        OlderConflictingRevs.predecessor_id,
+        older_revision_id, 
+        older_time_saved,
+        revision_id most_recent_revision_id,
+        time_saved most_recent_time_saved
+FROM OlderConflictingRevs
+JOIN MostRecentRevsPerPage
+ON OlderConflictingRevs.page_id = MostRecentRevsPerPage.page_id;
 
+--Second Query: List all users and their associated notebooks
+SELECT username, permission_description, container_id, container_name
+FROM Account
+NATURAL JOIN NugatoriaPermission
+NATURAL JOIN PermissionLevel
+NATURAL JOIN NugatoriaContainer
+WHERE container_type_id = (SELECT container_type_id 
+                            FROM ContainerType 
+                            WHERE container_type = 'Notebook');
+
+--Third query: Average change in balance per user over previous year
+--for users with nonzero monthly charge
+SELECT username, AVG(new_balance - old_balance) avg_diff
+FROM AccountBalanceChange
+NATURAL JOIN Account
+WHERE monthly_charge > 0
+GROUP BY username
+ORDER BY username;
 
 --Tests and Examples
 --Create a simple notebook
@@ -547,3 +572,59 @@ NATURAL JOIN Account
 NATURAL JOIN NugatoriaContainer
 NATURAL JOIN PermissionLevel
 WHERE username = 'ljones';
+
+SELECT container_id, container_name, owner_id, time_saved 
+FROM NugatoriaContainer 
+NATURAL JOIN Revision
+WHERE owner_id = 3;
+
+--Insert data for testing query about average change in balance per user
+--We create a user, Helene Tate.
+--Her balance increases from 0 to 4 and then 4 to 6,
+--so the differences are 4 and 2.
+--Hence we expect her average difference to be 3.
+BEGIN
+    Create_Free_Account('htate', 
+    'Helene', 
+    'Tate', 
+    'htate@calculus.com', 
+    'aafdaf8@lnfprjy4', --Salt
+    'sfahdfgthknbvdfjmcdrtyuio9876rfvbnky', --hashed password
+    'C:\Users\htate\Documents\rev1.ngdat');
+END;
+/
+UPDATE Account
+SET monthly_charge = 2
+WHERE username = 'htate';
+UPDATE Account
+SET account_balance = 4
+WHERE username = 'htate';
+UPDATE Account
+SET account_balance = 6
+WHERE username = 'htate';
+
+--We create another user, Aaron Bowdish.
+--His balance increases from 0 to 5 and then 5 to 10,
+--so the differences are 5 and 5.
+--Hence we expect his average difference to be 5.
+BEGIN
+    Create_Free_Account('abowdish', 
+    'Aaron', 
+    'Bowdish', 
+    'abowdish@calculus.com', 
+    'aafdaf8fash@lnfprjy4', --Salt
+    'sfahdfgthdfasrgknbvdfjmcdrtyuio9876rfvbnky', --hashed password
+    'C:\Users\abowdish\Documents\rev1.ngdat');
+END;
+/
+UPDATE Account
+SET monthly_charge = 5
+WHERE username = 'abowdish';
+UPDATE Account
+SET account_balance = 5
+WHERE username = 'abowdish';
+UPDATE Account
+SET account_balance = 10
+WHERE username = 'abowdish';
+
+SELECT * FROM AccountBalanceChange NATURAL JOIN Account;
